@@ -1,0 +1,34 @@
+// Prisma schema — Cross-Docking API (PoC)
+// Source of truth: a csomag AKTUÁLIS, hiteles állapota (ACID).
+// A mozgástörténet NEM itt él, hanem MongoDB-ben (lásd TrackingHistoryModule).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// A csomag életciklus-állapotai. Irányított gráf (state machine):
+/// CREATED -> RECEIVED_AT_CROSSDOCK -> SORTED -> DISPATCHED.
+/// Csak előre léphet; DISPATCHED után minden további léptetés 409 Conflict.
+/// Az enum natív PostgreSQL típusként jön létre -> az integritást a DB motor is őrzi.
+enum PackageStatus {
+  CREATED
+  RECEIVED_AT_CROSSDOCK
+  SORTED
+  DISPATCHED
+}
+
+model Package {
+  id               String        @id @default(uuid()) @db.Uuid
+  trackingNumber   String        @unique @map("tracking_number")
+  status           PackageStatus @default(CREATED)
+  lastScanLocation String?       @map("last_scan_location")
+  createdAt        DateTime      @default(now()) @map("created_at")
+  updatedAt        DateTime      @updatedAt @map("updated_at")
+
+  @@map("packages")
+}
