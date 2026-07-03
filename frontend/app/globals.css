@@ -1,0 +1,20 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  @apply bg-surface-subtle text-slate-900 antialiased;
+}
+
+/* Csak billentyűzet-navigációnál látszó fókuszgyűrű (egérrel nem zavaró). */
+:focus:not(:focus-visible) {
+  outline: none;
+}
