@@ -1,0 +1,46 @@
+# Függőségek és build kimenet — a konténerben újra generálódik
+node_modules
+dist
+build
+
+# Prisma generált client (a build fázisban újragenerálódik a helyes engine-nel)
+prisma/generated
+
+# Környezeti fájlok — sosem kerülnek az image-be (secret szivárgás ellen)
+.env
+.env.*
+!.env.example
+
+# Tesztek, coverage, cache
+coverage
+.nyc_output
+*.spec.ts
+test
+
+# Logok
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# IDE / szerkesztő / OS
+.vscode
+.idea
+*.swp
+.DS_Store
+Thumbs.db
+
+# Verziókövetés és CI
+.git
+.gitignore
+.github
+
+# Docker maga
+Dockerfile
+.dockerignore
+docker-compose*.yml
+
+# Egyéb
+*.md
+!README.md

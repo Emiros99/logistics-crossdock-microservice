@@ -1,0 +1,176 @@
+# =============================================================================
+# Cross-Docking API (PoC) — teljes stack egyetlen paranccsal:
+#
+#     docker compose up --build
+#
+# Szolgáltatások:
+#   postgres  :5432  — csomag STÁTUSZ (ACID, source of truth)   [Prisma]
+#   mongo     :27017 — mozgásTÖRTÉNET (append-only telemetria)  [Mongoose]
+#   redis     :6380 (host) -> :6379 (konténer) — CACHE + BullMQ üzenetsor-backend
+#   backend   :3001  — NestJS API (globális prefix: /api)
+#   frontend  :3000  — Next.js admin dashboard
+#
+# Indulási sorrend: a három adattár healthcheckje ZÖLD -> backend (előbb
+# `prisma migrate deploy`, majd az app) -> frontend.
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL — a csomag hiteles állapota (Prisma)
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: crossdock-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: crossdock
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # -U/-d explicit: a pg_isready ne a default `root` user/DB-t próbálja
+      test: ["CMD-SHELL", "pg_isready -U postgres -d crossdock"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - crossdock-net
+
+  # ---------------------------------------------------------------------------
+  # MongoDB — a csomag teljes mozgástörténete (Mongoose)
+  # ---------------------------------------------------------------------------
+  mongo:
+    image: mongo:7
+    container_name: crossdock-mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      # mongosh a Mongo 6+ image-ben elérhető; ping parancs az admin DB-n
+      test: ["CMD-SHELL", "mongosh --quiet --eval \"db.adminCommand('ping').ok\" | grep -q 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - crossdock-net
+
+  # ---------------------------------------------------------------------------
+  # Redis — cache-aside réteg + BullMQ ("notifications" sor) backend
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: crossdock-redis
+    restart: unless-stopped
+    ports:
+      # Host oldalon 6380: fejlesztői gépen a 6379-et gyakran foglalja egy
+      # másik lokális Redis. A konténerhálózaton belül változatlanul redis:6379
+      # (a backend a service-nevet használja, ezt a mappelés nem érinti).
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    networks:
+      - crossdock-net
+
+  # ---------------------------------------------------------------------------
+  # Backend — NestJS API
+  #   Indulás: MEGVÁRJA a 3 adattár healthy állapotát, majd
+  #   [1] prisma migrate deploy  (a séma naprakész)
+  #   [2] node dist/main.js      (az alkalmazás)
+  # ---------------------------------------------------------------------------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: crossdock-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # Konténerhálózaton a hostnév a SERVICE NEVE (nem localhost)!
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/crossdock
+      MONGO_URI: mongodb://mongo:27017/crossdock_tracking
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      PORT: 3001
+      NODE_ENV: production
+      # A böngésző-origin, ahonnan a frontend hív -> explicit, ne kód-defaulton múljon.
+      # A FRONTEND_PORT-ot követi: ha a frontend más host-porton fut, a CORS is oda enged.
+      CORS_ORIGIN: http://localhost:${FRONTEND_PORT:-3000}
+    ports:
+      - "3001:3001"
+    # A migráció az app indulása ELŐTT fut (a Postgres ekkor már healthy).
+    # A migrate deploy idempotens; ha nincs új migráció, no-op.
+    command: sh -c "npx prisma migrate deploy && node dist/main.js"
+    healthcheck:
+      # A node:20-alpine hozza a busybox wget-et; a /api/health nem érint DB-t.
+      # Bőkezű start_period: indulásnál előbb a `prisma migrate deploy` fut le.
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3001/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    networks:
+      - crossdock-net
+
+  # ---------------------------------------------------------------------------
+  # Frontend — Next.js admin dashboard
+  #   NEXT_PUBLIC_API_URL = a BÖNGÉSZŐ által elért API cím -> localhost:3001
+  #   (build ARG-ként is átadjuk, mert a NEXT_PUBLIC_* build időben sül a bundle-be)
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:3001
+    container_name: crossdock-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:3001
+      PORT: 3000
+      NODE_ENV: production
+    ports:
+      # Host-port env-ből felülírható (fejlesztői gépen a 3000 gyakran foglalt
+      # egy másik `next dev` miatt):  FRONTEND_PORT=3010 docker compose up
+      - "${FRONTEND_PORT:-3000}:3000"
+    networks:
+      - crossdock-net
+
+# -----------------------------------------------------------------------------
+# Named volume-ok — az adatok túlélik a konténer újraépítését
+# -----------------------------------------------------------------------------
+volumes:
+  postgres_data:
+    driver: local
+  mongo_data:
+    driver: local
+  redis_data:
+    driver: local
+
+# -----------------------------------------------------------------------------
+# Dedikált bridge hálózat — a service-ek névvel érik el egymást
+# -----------------------------------------------------------------------------
+networks:
+  crossdock-net:
+    driver: bridge
